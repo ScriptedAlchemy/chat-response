@@ -147,4 +147,158 @@ describe("responses tools and state", () => {
       ]),
     );
   });
+
+  it("passes through direct function tools without wrapping", async () => {
+    const upstream = await startMockChatServer((request) => ({
+      json: {
+        id: "chatcmpl_function",
+        object: "chat.completion",
+        created: 1,
+        model: request.model,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "tool_calls",
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_weather_1",
+                  type: "function",
+                  function: {
+                    name: "get_weather",
+                    arguments: JSON.stringify({ city: "Paris" })
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }));
+    cleanups.push(upstream.close);
+
+    const adapter = await startAdapterServer({
+      upstream: {
+        baseUrl: upstream.url
+      }
+    });
+    cleanups.push(adapter.close);
+
+    const response = await fetch(`${adapter.url}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "what's the weather?",
+        tools: [
+          {
+            type: "function",
+            name: "get_weather",
+            description: "Get weather for a city",
+            parameters: {
+              type: "object",
+              properties: {
+                city: { type: "string" }
+              },
+              required: ["city"]
+            }
+          }
+        ]
+      })
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.output[0]).toMatchObject({
+      type: "function_call",
+      call_id: "call_weather_1",
+      name: "get_weather",
+      arguments: JSON.stringify({ city: "Paris" })
+    });
+    expect(upstream.requests[0]?.tools).toEqual([
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({
+          name: "get_weather"
+        })
+      })
+    ]);
+  });
+
+  it("wraps shell tools into chat function tools and unwraps shell calls", async () => {
+    const wrappedShell = wrappedToolName("shell", "shell");
+    const upstream = await startMockChatServer((request) => ({
+      json: {
+        id: "chatcmpl_shell",
+        object: "chat.completion",
+        created: 1,
+        model: request.model,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "tool_calls",
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_shell_1",
+                  type: "function",
+                  function: {
+                    name: wrappedShell,
+                    arguments: JSON.stringify({
+                      commands: ["ls -la", "pwd"],
+                      timeout_ms: 5000,
+                      max_output_length: 1200
+                    })
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }));
+    cleanups.push(upstream.close);
+
+    const adapter = await startAdapterServer({
+      upstream: {
+        baseUrl: upstream.url
+      }
+    });
+    cleanups.push(adapter.close);
+
+    const response = await fetch(`${adapter.url}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "inspect the workspace",
+        tools: [{ type: "shell" }]
+      })
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.output[0]).toMatchObject({
+      type: "shell_call",
+      call_id: "call_shell_1",
+      action: {
+        commands: ["ls -la", "pwd"],
+        timeout_ms: 5000,
+        max_output_length: 1200
+      },
+      environment: null
+    });
+    expect(upstream.requests[0]?.tools).toEqual([
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({
+          name: wrappedShell
+        })
+      })
+    ]);
+  });
 });
