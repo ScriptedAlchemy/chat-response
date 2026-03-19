@@ -1,0 +1,9 @@
+name = "chat-response"
+main = "src/worker.ts"
+compatibility_date = "2026-03-18"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "chat-response"
+database_id = "ae3a42a8-b8d2-4069-b4d5-086f61409093"

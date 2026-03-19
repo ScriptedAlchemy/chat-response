@@ -1,0 +1,1 @@
+ALTER TABLE tenants ADD COLUMN encryption_enabled INTEGER NOT NULL DEFAULT 0;

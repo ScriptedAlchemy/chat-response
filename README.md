@@ -97,6 +97,60 @@ npm run build
 npm start
 ```
 
+## Cloudflare Workers
+
+The Worker path is multitenant. Each tenant gets a unique endpoint under `/t/:tenantId/v1/...` and a separate tenant secret that must be sent as `Authorization: Bearer <tenant-secret>` or `X-API-Key: <tenant-secret>`.
+
+### Setup
+
+```bash
+npm install
+npm run cf:login
+npm run cf:d1:create
+```
+
+`npm run cf:d1:create` creates the D1 database and prints the real `database_id`. Copy that into `wrangler.toml`, then set the Worker secrets:
+
+```bash
+wrangler secret put PROVISIONING_KEY
+wrangler secret put UPSTREAM_BASE_URL
+wrangler secret put UPSTREAM_API_KEY
+```
+
+If your upstream uses header auth or extra headers/query params, set those as Worker vars/secrets too. The Worker also accepts `ADAPTER_API_KEY` as a provisioning-key fallback, but `PROVISIONING_KEY` is the preferred setup.
+
+Apply the D1 schema after updating `wrangler.toml`:
+
+```bash
+npm run d1:migrate
+```
+
+### Deploy
+
+```bash
+npm run deploy:worker
+```
+
+### Provisioning flow
+
+Open the Worker root page at `/` to create tenants. The page posts to `/provision` with the provisioning key, and the response returns:
+
+- `tenant_id`
+- `tenant_secret`
+- `responses_base_url`
+
+Use `responses_base_url` as the tenant-specific Responses endpoint, for example:
+
+```bash
+curl -X POST https://your-worker.example.com/t/<tenantId>/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <tenant-secret>" \
+  -d '{
+    "model": "gpt-5",
+    "input": "hello"
+  }'
+```
+
 ## Example request
 
 ```bash

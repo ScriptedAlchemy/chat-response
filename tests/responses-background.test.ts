@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { ResponseObject } from "../src/types/openai.js";
 import { startAdapterServer } from "./fixtures/adapter-server.js";
 import { startMockChatServer } from "./fixtures/upstream-chat-server.js";
+import { readJson } from "./json.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -54,19 +56,19 @@ describe("responses background mode", () => {
     });
 
     expect(createResponse.status).toBe(200);
-    const created = await createResponse.json();
+    const created = await readJson<ResponseObject>(createResponse);
     expect(["queued", "in_progress"]).toContain(created.status);
 
     const cancelResponse = await fetch(`${adapter.url}/v1/responses/${created.id}/cancel`, {
       method: "POST"
     });
     expect(cancelResponse.status).toBe(200);
-    const cancelled = await cancelResponse.json();
+    const cancelled = await readJson<ResponseObject>(cancelResponse);
     expect(cancelled.status).toBe("cancelled");
 
     const retrieved = await fetch(`${adapter.url}/v1/responses/${created.id}`);
     expect(retrieved.status).toBe(200);
-    expect((await retrieved.json()).status).toBe("cancelled");
+    expect((await readJson<ResponseObject>(retrieved)).status).toBe("cancelled");
   });
 
   it("allows polling until a background response completes", async () => {
@@ -116,13 +118,13 @@ describe("responses background mode", () => {
     });
 
     expect(createResponse.status).toBe(200);
-    const created = await createResponse.json();
+    const created = await readJson<ResponseObject>(createResponse);
     expect(["queued", "in_progress"]).toContain(created.status);
 
     let terminal: any = null;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const retrieved = await fetch(`${adapter.url}/v1/responses/${created.id}`);
-      terminal = await retrieved.json();
+      terminal = await readJson<ResponseObject>(retrieved);
       if (terminal.status === "completed") {
         break;
       }

@@ -1,0 +1,10 @@
+ALTER TABLE tenants ADD COLUMN upstream_base_url TEXT;
+ALTER TABLE tenants ADD COLUMN upstream_chat_path TEXT;
+ALTER TABLE tenants ADD COLUMN upstream_api_key TEXT;
+ALTER TABLE tenants ADD COLUMN upstream_auth_mode TEXT;
+ALTER TABLE tenants ADD COLUMN upstream_api_key_header TEXT;
+ALTER TABLE tenants ADD COLUMN upstream_query_params TEXT;
+ALTER TABLE tenants ADD COLUMN upstream_headers TEXT;
+ALTER TABLE tenants ADD COLUMN upstream_supports_developer_role INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE tenants ADD COLUMN upstream_supports_audio_input INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE tenants ADD COLUMN upstream_supports_file_parts INTEGER NOT NULL DEFAULT 1;

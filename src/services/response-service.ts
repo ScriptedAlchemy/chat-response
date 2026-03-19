@@ -20,29 +20,32 @@ import {
   normalizeInputItems
 } from "../adapter/response-builder.js";
 import { transcodeChatStream } from "../adapter/stream-transcoder.js";
-import {
-  mapResponseToolsToChatTools,
-  mapToolChoice
-} from "../adapter/tool-mapper.js";
-import { ResponseStore } from "../store/sqlite.js";
+import { mapResponseToolsToChatTools, mapToolChoice } from "../adapter/tool-mapper.js";
+import type { ResponseStoreLike } from "../store/response-store.js";
 import { ChatCompletionsClient } from "../upstream/chat-client.js";
+
+type CreateOptions = {
+  waitUntil?: (promise: Promise<unknown>) => void;
+};
 
 export class ResponseService {
   private readonly jobs = new Map<string, AbortController>();
 
   public constructor(
     private readonly config: AdapterConfig,
-    private readonly store: ResponseStore,
+    private readonly store: ResponseStoreLike,
     private readonly client: ChatCompletionsClient,
+    private readonly tenantId = "local",
   ) {}
 
   public async create(
     request: ResponsesCreateRequest,
+    options?: CreateOptions,
   ): Promise<StoredResponse> {
     const { requestId, conversation, inputItems, chatRequest, toolMapping, shell } =
-      this.prepareRequest(request);
+      await this.prepareRequest(request);
 
-    this.store.createResponse({
+    await this.store.createResponse(this.tenantId, {
       id: requestId,
       createdAt: shell.created_at,
       request,
@@ -52,15 +55,17 @@ export class ResponseService {
       conversationId: conversation,
       background: Boolean(request.background)
     });
-    this.store.storeItems(requestId, "input", inputItems);
+    await this.store.storeItems(this.tenantId, requestId, "input", inputItems);
 
     if (request.background) {
       if (request.stream) {
         throw invalidRequest("background and stream cannot be used together", "stream");
       }
 
-      this.store.createBackgroundJob(requestId);
-      this.runBackground(requestId, request, conversation, inputItems, chatRequest, toolMapping, shell);
+      await this.store.createBackgroundJob(this.tenantId, requestId);
+      const backgroundTask = this.runBackground(requestId, request, conversation, chatRequest, toolMapping, shell);
+      options?.waitUntil?.(backgroundTask);
+      void backgroundTask;
       return this.mustGetResponse(requestId);
     }
 
@@ -72,11 +77,11 @@ export class ResponseService {
       toolMapping
     });
 
-    this.store.clearItems(requestId, "output");
-    this.store.storeItems(requestId, "output", completed.outputItems);
-    this.store.updateResponse(requestId, completed.response, chatRequest);
+    await this.store.clearItems(this.tenantId, requestId, "output");
+    await this.store.storeItems(this.tenantId, requestId, "output", completed.outputItems);
+    await this.store.updateResponse(this.tenantId, requestId, completed.response, chatRequest);
     if (conversation) {
-      this.store.upsertConversation(conversation, requestId);
+      await this.store.upsertConversation(this.tenantId, conversation, requestId);
     }
 
     return this.mustGetResponse(requestId);
@@ -87,9 +92,9 @@ export class ResponseService {
     write: (chunk: string) => Promise<void> | void,
   ): Promise<StoredResponse> {
     const { requestId, conversation, inputItems, chatRequest, toolMapping, shell } =
-      this.prepareRequest(request);
+      await this.prepareRequest(request);
 
-    this.store.createResponse({
+    await this.store.createResponse(this.tenantId, {
       id: requestId,
       createdAt: shell.created_at,
       request,
@@ -99,7 +104,7 @@ export class ResponseService {
       conversationId: conversation,
       background: false
     });
-    this.store.storeItems(requestId, "input", inputItems);
+    await this.store.storeItems(this.tenantId, requestId, "input", inputItems);
 
     const upstream = await this.client.createStream(chatRequest);
     const transcoded = await transcodeChatStream({
@@ -114,27 +119,27 @@ export class ResponseService {
 
     await write(encodeDoneFrame());
 
-    this.store.clearItems(requestId, "output");
-    this.store.storeItems(requestId, "output", transcoded.outputItems);
-    this.store.replaceEvents(requestId, transcoded.events);
-    this.store.updateResponse(requestId, transcoded.response, chatRequest);
+    await this.store.clearItems(this.tenantId, requestId, "output");
+    await this.store.storeItems(this.tenantId, requestId, "output", transcoded.outputItems);
+    await this.store.replaceEvents(this.tenantId, requestId, transcoded.events);
+    await this.store.updateResponse(this.tenantId, requestId, transcoded.response, chatRequest);
     if (conversation) {
-      this.store.upsertConversation(conversation, requestId);
+      await this.store.upsertConversation(this.tenantId, conversation, requestId);
     }
 
     return this.mustGetResponse(requestId);
   }
 
-  public getResponse(id: string): StoredResponse {
+  public async getResponse(id: string): Promise<StoredResponse> {
     return this.mustGetResponse(id);
   }
 
-  public listInputItems(
+  public async listInputItems(
     responseId: string,
     options?: { order?: "asc" | "desc"; limit?: number; after?: string | null },
-  ): InputItemListResponse {
-    this.mustGetResponse(responseId);
-    const items = this.store.listInputItems(responseId, options);
+  ): Promise<InputItemListResponse> {
+    await this.mustGetResponse(responseId);
+    const items = await this.store.listInputItems(this.tenantId, responseId, options);
 
     return {
       object: "list",
@@ -145,13 +150,13 @@ export class ResponseService {
     };
   }
 
-  public deleteResponse(id: string): void {
-    this.mustGetResponse(id);
-    this.store.deleteResponse(id);
+  public async deleteResponse(id: string): Promise<void> {
+    await this.mustGetResponse(id);
+    await this.store.deleteResponse(this.tenantId, id);
   }
 
-  public cancelResponse(id: string): ResponseObject {
-    const stored = this.mustGetResponse(id);
+  public async cancelResponse(id: string): Promise<ResponseObject> {
+    const stored = await this.mustGetResponse(id);
     if (
       stored.response.status === "completed" ||
       stored.response.status === "failed" ||
@@ -160,7 +165,7 @@ export class ResponseService {
       return stored.response;
     }
 
-    this.store.markCancelRequested(id);
+    await this.store.markCancelRequested(this.tenantId, id);
     const controller = this.jobs.get(id);
     if (controller) {
       controller.abort();
@@ -171,8 +176,8 @@ export class ResponseService {
       status: "cancelled",
       completed_at: Math.floor(Date.now() / 1000)
     };
-    this.store.updateResponse(id, cancelled);
-    this.store.updateBackgroundJob(id, "cancelled", { finished: true });
+    await this.store.updateResponse(this.tenantId, id, cancelled);
+    await this.store.updateBackgroundJob(this.tenantId, id, "cancelled", { finished: true });
 
     return cancelled;
   }
@@ -181,7 +186,7 @@ export class ResponseService {
     id: string,
     write: (chunk: string) => Promise<void> | void,
   ): Promise<void> {
-    const stored = this.mustGetResponse(id);
+    const stored = await this.mustGetResponse(id);
     const events = stored.eventStream.length ? stored.eventStream : this.synthesizeReplayEvents(stored.response);
     for (const event of events) {
       await write(encodeSseFrame(event.type, event));
@@ -189,7 +194,9 @@ export class ResponseService {
     await write(encodeDoneFrame());
   }
 
-  public async countInputTokens(body: InputTokenCountRequest): Promise<{ object: "response.input_tokens"; input_tokens: number }> {
+  public async countInputTokens(
+    body: InputTokenCountRequest,
+  ): Promise<{ object: "response.input_tokens"; input_tokens: number }> {
     const request: ResponsesCreateRequest = {
       model: body.model ?? "unknown-model",
       input: body.input ?? null,
@@ -204,7 +211,7 @@ export class ResponseService {
       truncation: body.truncation
     };
 
-    const { chatRequest } = this.prepareRequest(request, false);
+    const { chatRequest } = await this.prepareRequest(request, false);
     return {
       object: "response.input_tokens",
       input_tokens: Math.max(1, Math.ceil(JSON.stringify(chatRequest).length / 4))
@@ -212,7 +219,7 @@ export class ResponseService {
   }
 
   public async compact(request: ResponsesCreateRequest): Promise<CompactedResponse> {
-    const history = this.resolveHistory(request);
+    const history = await this.resolveHistory(request);
     const transcript = history
       .flatMap((entry) => [
         ...entry.inputItems.map((item) => JSON.stringify(item)),
@@ -258,17 +265,17 @@ export class ResponseService {
     };
   }
 
-  private prepareRequest(
+  private async prepareRequest(
     request: ResponsesCreateRequest,
     persistConversation = true,
-  ): {
+  ): Promise<{
     requestId: string;
     conversation: string | null;
     inputItems: ResponseInputItem[];
     chatRequest: ChatCompletionRequest;
     toolMapping: ReturnType<typeof mapResponseToolsToChatTools>;
     shell: ResponseObject;
-  } {
+  }> {
     if (!request.model) {
       throw invalidRequest("model is required", "model");
     }
@@ -278,7 +285,7 @@ export class ResponseService {
     }
 
     const requestId = responseId();
-    const history = this.resolveHistory(request);
+    const history = await this.resolveHistory(request);
     const conversation = persistConversation ? this.resolveConversationId(request, history) : null;
     const inputItems = normalizeInputItems(request.input);
     const toolMapping = mapResponseToolsToChatTools(request.tools ?? []);
@@ -329,7 +336,7 @@ export class ResponseService {
       tool_choice: mapToolChoice(request.tool_choice, toolMapping),
       tools: toolMapping.chatTools.length ? toolMapping.chatTools : undefined,
       top_p: request.top_p ?? null,
-      verbosity: request.text?.verbosity ?? null
+      verbosity: request.text?.verbosity ?? undefined
     };
 
     const shell = buildResponseShell({
@@ -342,17 +349,17 @@ export class ResponseService {
     return { requestId, conversation, inputItems, chatRequest, toolMapping, shell };
   }
 
-  private resolveHistory(request: ResponsesCreateRequest): StoredResponse[] {
+  private async resolveHistory(request: ResponsesCreateRequest): Promise<StoredResponse[]> {
     if (typeof request.conversation === "string") {
-      return this.store.getConversationResponses(request.conversation);
+      return this.store.getConversationResponses(this.tenantId, request.conversation);
     }
 
     if (request.conversation && typeof request.conversation === "object" && request.conversation.id) {
-      return this.store.getConversationResponses(request.conversation.id);
+      return this.store.getConversationResponses(this.tenantId, request.conversation.id);
     }
 
     if (request.previous_response_id) {
-      return this.store.getChainUntil(request.previous_response_id);
+      return this.store.getChainUntil(this.tenantId, request.previous_response_id);
     }
 
     return [];
@@ -374,75 +381,72 @@ export class ResponseService {
     return request.previous_response_id ? conversationId() : null;
   }
 
-  private mustGetResponse(id: string): StoredResponse {
-    const stored = this.store.getResponse(id);
+  private async mustGetResponse(id: string): Promise<StoredResponse> {
+    const stored = await this.store.getResponse(this.tenantId, id);
     if (!stored) {
       throw notFound(`No response found with id '${id}'.`);
     }
     return stored;
   }
 
-  private runBackground(
+  private async runBackground(
     requestId: string,
     request: ResponsesCreateRequest,
     conversation: string | null,
-    _inputItems: ResponseInputItem[],
     chatRequest: ChatCompletionRequest,
     toolMapping: ReturnType<typeof mapResponseToolsToChatTools>,
     shell: ResponseObject,
-  ): void {
+  ): Promise<void> {
     const controller = new AbortController();
     this.jobs.set(requestId, controller);
-    this.store.updateBackgroundJob(requestId, "in_progress");
+    await this.store.updateBackgroundJob(this.tenantId, requestId, "in_progress");
 
-    void (async () => {
-      try {
-        const chat = await this.client.create(chatRequest, controller.signal);
-        if (this.store.isCancelRequested(requestId)) {
-          return;
-        }
-
-        const completed = buildCompletedResponse({
-          shell: {
-            ...shell,
-            status: "in_progress"
-          },
-          chat,
-          request,
-          toolMapping
-        });
-        this.store.clearItems(requestId, "output");
-        this.store.storeItems(requestId, "output", completed.outputItems);
-        this.store.updateResponse(requestId, completed.response, chatRequest);
-        this.store.updateBackgroundJob(requestId, "completed", { finished: true });
-        if (conversation) {
-          this.store.upsertConversation(conversation, requestId);
-        }
-      } catch (error) {
-        if (controller.signal.aborted) {
-          this.store.setResponseStatus(requestId, "cancelled");
-          this.store.updateBackgroundJob(requestId, "cancelled", { finished: true });
-          return;
-        }
-
-        const current = this.mustGetResponse(requestId).response;
-        this.store.updateResponse(requestId, {
-          ...current,
-          status: "failed",
-          completed_at: Math.floor(Date.now() / 1000),
-          error: {
-            code: "upstream_error",
-            message: error instanceof Error ? error.message : "Background request failed"
-          }
-        });
-        this.store.updateBackgroundJob(requestId, "failed", {
-          finished: true,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      } finally {
-        this.jobs.delete(requestId);
+    try {
+      const chat = await this.client.create(chatRequest, controller.signal);
+      if (await this.store.isCancelRequested(this.tenantId, requestId)) {
+        return;
       }
-    })();
+
+      const completed = buildCompletedResponse({
+        shell: {
+          ...shell,
+          status: "in_progress"
+        },
+        chat,
+        request,
+        toolMapping
+      });
+      await this.store.clearItems(this.tenantId, requestId, "output");
+      await this.store.storeItems(this.tenantId, requestId, "output", completed.outputItems);
+      await this.store.updateResponse(this.tenantId, requestId, completed.response, chatRequest);
+      await this.store.updateBackgroundJob(this.tenantId, requestId, "completed", { finished: true });
+      if (conversation) {
+        await this.store.upsertConversation(this.tenantId, conversation, requestId);
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        await this.store.setResponseStatus(this.tenantId, requestId, "cancelled");
+        await this.store.updateBackgroundJob(this.tenantId, requestId, "cancelled", { finished: true });
+        return;
+      }
+
+      const current = (await this.mustGetResponse(requestId)).response;
+      await this.store.updateResponse(this.tenantId, requestId, {
+        ...current,
+        status: "failed",
+        completed_at: Math.floor(Date.now() / 1000),
+        error: {
+          code: "upstream_error",
+          message: error instanceof Error ? error.message : "Background request failed"
+        }
+      });
+      await this.store.updateBackgroundJob(this.tenantId, requestId, "failed", {
+        finished: true,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      this.jobs.delete(requestId);
+    }
   }
 
   private synthesizeReplayEvents(response: ResponseObject): ResponseStreamEvent[] {

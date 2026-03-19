@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { wrappedToolName } from "../src/adapter/tool-mapper.js";
+import type { ResponseObject } from "../src/types/openai.js";
 import { startAdapterServer } from "./fixtures/adapter-server.js";
 import { startMockChatServer } from "./fixtures/upstream-chat-server.js";
+import { readJson } from "./json.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -90,7 +92,7 @@ describe("responses tools and state", () => {
       })
     });
     expect(firstResponse.status).toBe(200);
-    const first = await firstResponse.json();
+    const first = await readJson<ResponseObject>(firstResponse);
     expect(first.output[0]).toMatchObject({
       type: "apply_patch_call",
       call_id: "call_patch_1"
@@ -124,7 +126,7 @@ describe("responses tools and state", () => {
     });
 
     expect(secondResponse.status).toBe(200);
-    const second = await secondResponse.json();
+    const second = await readJson<ResponseObject>(secondResponse);
     expect(second.output_text).toBe("Patch applied.");
 
     expect(upstream.requests[1]?.messages).toEqual(
@@ -210,7 +212,7 @@ describe("responses tools and state", () => {
     });
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await readJson<ResponseObject>(response);
     expect(body.output[0]).toMatchObject({
       type: "function_call",
       call_id: "call_weather_1",
@@ -281,7 +283,7 @@ describe("responses tools and state", () => {
     });
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await readJson<ResponseObject>(response);
     expect(body.output[0]).toMatchObject({
       type: "shell_call",
       call_id: "call_shell_1",

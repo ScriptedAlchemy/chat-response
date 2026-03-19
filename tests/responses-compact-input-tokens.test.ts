@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { CompactedResponse } from "../src/types/openai.js";
 import { startAdapterServer } from "./fixtures/adapter-server.js";
 import { startMockChatServer } from "./fixtures/upstream-chat-server.js";
+import { readJson } from "./json.js";
+
+type InputTokensResponse = {
+  object: "response.input_tokens";
+  input_tokens: number;
+};
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -54,7 +61,7 @@ describe("responses extended endpoints", () => {
       })
     });
     expect(tokensResponse.status).toBe(200);
-    const tokens = await tokensResponse.json();
+    const tokens = await readJson<InputTokensResponse>(tokensResponse);
     expect(tokens.object).toBe("response.input_tokens");
     expect(tokens.input_tokens).toBeGreaterThan(0);
 
@@ -67,7 +74,7 @@ describe("responses extended endpoints", () => {
       })
     });
     expect(compactResponse.status).toBe(200);
-    const compact = await compactResponse.json();
+    const compact = await readJson<CompactedResponse>(compactResponse);
     expect(compact.object).toBe("response.compaction");
     expect(compact.output[0]).toMatchObject({
       type: "compaction"

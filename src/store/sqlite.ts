@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
+import type { ResponseStoreLike } from "./response-store.js";
 import type {
   ChatCompletionRequest,
   ResponseInputItem,
@@ -29,15 +30,34 @@ function parseJson<T>(value: string | null): T | null {
   return JSON.parse(value) as T;
 }
 
-export class ResponseStore {
+export class ResponseStore implements ResponseStoreLike {
   public readonly db: DatabaseSync;
 
   public constructor(filename: string) {
     this.db = new DatabaseSync(filename);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS tenants (
+        tenant_id TEXT PRIMARY KEY,
+        label TEXT,
+        secret_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        encryption_enabled INTEGER NOT NULL DEFAULT 0,
+        upstream_base_url TEXT,
+        upstream_chat_path TEXT,
+        upstream_api_key TEXT,
+        upstream_auth_mode TEXT,
+        upstream_api_key_header TEXT,
+        upstream_query_params TEXT,
+        upstream_headers TEXT,
+        upstream_supports_developer_role INTEGER NOT NULL DEFAULT 1,
+        upstream_supports_audio_input INTEGER NOT NULL DEFAULT 1,
+        upstream_supports_file_parts INTEGER NOT NULL DEFAULT 1
+      );
       CREATE TABLE IF NOT EXISTS responses (
-        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         completed_at INTEGER,
         status TEXT NOT NULL,
@@ -48,56 +68,69 @@ export class ResponseStore {
         conversation_id TEXT,
         background INTEGER NOT NULL DEFAULT 0,
         cancel_requested INTEGER NOT NULL DEFAULT 0,
-        deleted INTEGER NOT NULL DEFAULT 0
+        deleted INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (tenant_id, id)
       );
       CREATE TABLE IF NOT EXISTS response_items (
-        item_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
         response_id TEXT NOT NULL,
         direction TEXT NOT NULL,
         item_index INTEGER NOT NULL,
-        item_json TEXT NOT NULL
+        item_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, item_id)
       );
       CREATE TABLE IF NOT EXISTS response_events (
+        tenant_id TEXT NOT NULL,
         response_id TEXT NOT NULL,
         sequence_number INTEGER NOT NULL,
         event_type TEXT NOT NULL,
-        event_json TEXT NOT NULL
+        event_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, response_id, sequence_number)
       );
       CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        last_response_id TEXT
+        tenant_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        last_response_id TEXT,
+        PRIMARY KEY (tenant_id, id)
       );
       CREATE TABLE IF NOT EXISTS background_jobs (
-        response_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        response_id TEXT NOT NULL,
         state TEXT NOT NULL,
         started_at INTEGER,
         finished_at INTEGER,
-        error TEXT
+        error TEXT,
+        PRIMARY KEY (tenant_id, response_id)
       );
     `);
   }
 
-  public createResponse(record: {
-    id: string;
-    createdAt: number;
-    request: ResponsesCreateRequest;
-    chatRequest: ChatCompletionRequest | null;
-    response: ResponseObject;
-    previousResponseId?: string | null;
-    conversationId?: string | null;
-    background?: boolean;
-  }): void {
+  public async createResponse(
+    tenantId: string,
+    record: {
+      id: string;
+      createdAt: number;
+      request: ResponsesCreateRequest;
+      chatRequest: ChatCompletionRequest | null;
+      response: ResponseObject;
+      previousResponseId?: string | null;
+      conversationId?: string | null;
+      background?: boolean;
+    },
+  ): Promise<void> {
     this.db
       .prepare(
         `
           INSERT INTO responses (
-            id, created_at, completed_at, status, request_json, chat_request_json,
+            tenant_id, id, created_at, completed_at, status, request_json, chat_request_json,
             response_json, previous_response_id, conversation_id, background, cancel_requested, deleted
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
         `,
       )
       .run(
+        tenantId,
         record.id,
         record.createdAt,
         record.response.completed_at ?? null,
@@ -111,17 +144,18 @@ export class ResponseStore {
       );
   }
 
-  public updateResponse(
+  public async updateResponse(
+    tenantId: string,
     responseId: string,
     response: ResponseObject,
     chatRequest?: ChatCompletionRequest | null,
-  ): void {
+  ): Promise<void> {
     this.db
       .prepare(
         `
           UPDATE responses
           SET response_json = ?, chat_request_json = COALESCE(?, chat_request_json), status = ?, completed_at = ?
-          WHERE id = ?
+          WHERE tenant_id = ? AND id = ?
         `,
       )
       .run(
@@ -129,12 +163,13 @@ export class ResponseStore {
         chatRequest === undefined ? null : chatRequest ? JSON.stringify(chatRequest) : null,
         response.status ?? "completed",
         response.completed_at ?? null,
+        tenantId,
         responseId,
       );
   }
 
-  public setResponseStatus(responseId: string, status: string): void {
-    const row = this.getResponseRow(responseId);
+  public async setResponseStatus(tenantId: string, responseId: string, status: string): Promise<void> {
+    const row = this.getResponseRow(tenantId, responseId);
     if (!row) {
       return;
     }
@@ -149,35 +184,38 @@ export class ResponseStore {
       current.completed_at = Math.floor(Date.now() / 1000);
     }
 
-    this.updateResponse(responseId, current);
+    await this.updateResponse(tenantId, responseId, current);
   }
 
-  public markCancelRequested(responseId: string): void {
+  public async markCancelRequested(tenantId: string, responseId: string): Promise<void> {
     this.db
-      .prepare(`UPDATE responses SET cancel_requested = 1 WHERE id = ?`)
-      .run(responseId);
+      .prepare(`UPDATE responses SET cancel_requested = 1 WHERE tenant_id = ? AND id = ?`)
+      .run(tenantId, responseId);
   }
 
-  public isCancelRequested(responseId: string): boolean {
+  public async isCancelRequested(tenantId: string, responseId: string): Promise<boolean> {
     const row = this.db
-      .prepare(`SELECT cancel_requested FROM responses WHERE id = ?`)
-      .get(responseId) as { cancel_requested?: number } | undefined;
+      .prepare(`SELECT cancel_requested FROM responses WHERE tenant_id = ? AND id = ?`)
+      .get(tenantId, responseId) as { cancel_requested?: number } | undefined;
     return Boolean(row?.cancel_requested);
   }
 
-  public deleteResponse(responseId: string): void {
-    this.db.prepare(`UPDATE responses SET deleted = 1 WHERE id = ?`).run(responseId);
+  public async deleteResponse(tenantId: string, responseId: string): Promise<void> {
+    this.db
+      .prepare(`UPDATE responses SET deleted = 1 WHERE tenant_id = ? AND id = ?`)
+      .run(tenantId, responseId);
   }
 
-  public storeItems(
+  public async storeItems(
+    tenantId: string,
     responseId: string,
     direction: "input" | "output",
     items: Array<ResponseInputItem | ResponseOutputItem>,
-  ): void {
+  ): Promise<void> {
     const statement = this.db.prepare(
       `
-        INSERT OR REPLACE INTO response_items (item_id, response_id, direction, item_index, item_json)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO response_items (tenant_id, item_id, response_id, direction, item_index, item_json)
+        VALUES (?, ?, ?, ?, ?, ?)
       `,
     );
 
@@ -185,55 +223,63 @@ export class ResponseStore {
       const itemId =
         typeof item === "object" && item && "id" in item && typeof item.id === "string"
           ? item.id
-          : `${responseId}_${direction}_${index}`;
+          : `${tenantId}_${responseId}_${direction}_${index}`;
 
-      statement.run(itemId, responseId, direction, index, JSON.stringify(item));
+      statement.run(tenantId, itemId, responseId, direction, index, JSON.stringify(item));
     }
   }
 
-  public clearItems(responseId: string, direction?: "input" | "output"): void {
+  public async clearItems(
+    tenantId: string,
+    responseId: string,
+    direction?: "input" | "output",
+  ): Promise<void> {
     if (direction) {
       this.db
-        .prepare(`DELETE FROM response_items WHERE response_id = ? AND direction = ?`)
-        .run(responseId, direction);
+        .prepare(`DELETE FROM response_items WHERE tenant_id = ? AND response_id = ? AND direction = ?`)
+        .run(tenantId, responseId, direction);
       return;
     }
 
-    this.db.prepare(`DELETE FROM response_items WHERE response_id = ?`).run(responseId);
+    this.db
+      .prepare(`DELETE FROM response_items WHERE tenant_id = ? AND response_id = ?`)
+      .run(tenantId, responseId);
   }
 
-  public appendEvents(responseId: string, events: ResponseStreamEvent[]): void {
+  public async appendEvents(tenantId: string, responseId: string, events: ResponseStreamEvent[]): Promise<void> {
     const statement = this.db.prepare(
       `
-        INSERT INTO response_events (response_id, sequence_number, event_type, event_json)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO response_events (tenant_id, response_id, sequence_number, event_type, event_json)
+        VALUES (?, ?, ?, ?, ?)
       `,
     );
 
     for (const [index, event] of events.entries()) {
       const sequenceNumber =
         typeof event.sequence_number === "number" ? event.sequence_number : index + 1;
-      statement.run(responseId, sequenceNumber, event.type, JSON.stringify(event));
+      statement.run(tenantId, responseId, sequenceNumber, event.type, JSON.stringify(event));
     }
   }
 
-  public replaceEvents(responseId: string, events: ResponseStreamEvent[]): void {
-    this.db.prepare(`DELETE FROM response_events WHERE response_id = ?`).run(responseId);
-    this.appendEvents(responseId, events);
+  public async replaceEvents(tenantId: string, responseId: string, events: ResponseStreamEvent[]): Promise<void> {
+    this.db
+      .prepare(`DELETE FROM response_events WHERE tenant_id = ? AND response_id = ?`)
+      .run(tenantId, responseId);
+    await this.appendEvents(tenantId, responseId, events);
   }
 
-  public getEvents(responseId: string): ResponseStreamEvent[] {
+  public async getEvents(tenantId: string, responseId: string): Promise<ResponseStreamEvent[]> {
     const rows = this.db
       .prepare(
-        `SELECT event_json FROM response_events WHERE response_id = ? ORDER BY sequence_number ASC`,
+        `SELECT event_json FROM response_events WHERE tenant_id = ? AND response_id = ? ORDER BY sequence_number ASC`,
       )
-      .all(responseId) as Array<{ event_json: string }>;
+      .all(tenantId, responseId) as Array<{ event_json: string }>;
 
     return rows.map((row) => JSON.parse(row.event_json) as ResponseStreamEvent);
   }
 
-  public getResponse(responseId: string): StoredResponse | null {
-    const row = this.getResponseRow(responseId);
+  public async getResponse(tenantId: string, responseId: string): Promise<StoredResponse | null> {
+    const row = this.getResponseRow(tenantId, responseId);
     if (!row || row.deleted) {
       return null;
     }
@@ -249,32 +295,33 @@ export class ResponseStore {
       request,
       chatRequest: parseJson<ChatCompletionRequest>(row.chat_request_json),
       response,
-      inputItems: this.getItems<ResponseInputItem>(responseId, "input"),
-      outputItems: this.getItems<ResponseOutputItem>(responseId, "output"),
-      eventStream: this.getEvents(responseId)
+      inputItems: await this.getItems<ResponseInputItem>(tenantId, responseId, "input"),
+      outputItems: await this.getItems<ResponseOutputItem>(tenantId, responseId, "output"),
+      eventStream: await this.getEvents(tenantId, responseId)
     };
   }
 
-  public getItems<T>(responseId: string, direction: "input" | "output"): T[] {
+  public async getItems<T>(tenantId: string, responseId: string, direction: "input" | "output"): Promise<T[]> {
     const rows = this.db
       .prepare(
         `
           SELECT item_json
           FROM response_items
-          WHERE response_id = ? AND direction = ?
+          WHERE tenant_id = ? AND response_id = ? AND direction = ?
           ORDER BY item_index ASC
         `,
       )
-      .all(responseId, direction) as Array<{ item_json: string }>;
+      .all(tenantId, responseId, direction) as Array<{ item_json: string }>;
 
     return rows.map((row) => JSON.parse(row.item_json) as T);
   }
 
-  public listInputItems(
+  public async listInputItems(
+    tenantId: string,
     responseId: string,
     options?: { order?: "asc" | "desc"; limit?: number; after?: string | null },
-  ): ResponseInputItem[] {
-    let items = this.getItems<ResponseInputItem>(responseId, "input");
+  ): Promise<ResponseInputItem[]> {
+    let items = await this.getItems<ResponseInputItem>(tenantId, responseId, "input");
 
     if (options?.after) {
       const index = items.findIndex((item) => item.id === options.after);
@@ -294,41 +341,40 @@ export class ResponseStore {
     return items;
   }
 
-  public upsertConversation(id: string, lastResponseId: string): void {
+  public async upsertConversation(tenantId: string, id: string, lastResponseId: string): Promise<void> {
     this.db
       .prepare(
         `
-          INSERT INTO conversations (id, last_response_id)
-          VALUES (?, ?)
-          ON CONFLICT(id) DO UPDATE SET last_response_id = excluded.last_response_id
+          INSERT INTO conversations (tenant_id, id, last_response_id)
+          VALUES (?, ?, ?)
+          ON CONFLICT(tenant_id, id) DO UPDATE SET last_response_id = excluded.last_response_id
         `,
       )
-      .run(id, lastResponseId);
+      .run(tenantId, id, lastResponseId);
   }
 
-  public getConversationResponses(id: string): StoredResponse[] {
+  public async getConversationResponses(tenantId: string, id: string): Promise<StoredResponse[]> {
     const rows = this.db
       .prepare(
         `
           SELECT id
           FROM responses
-          WHERE conversation_id = ? AND deleted = 0
+          WHERE tenant_id = ? AND conversation_id = ? AND deleted = 0
           ORDER BY created_at ASC
         `,
       )
-      .all(id) as Array<{ id: string }>;
+      .all(tenantId, id) as Array<{ id: string }>;
 
-    return rows
-      .map((row) => this.getResponse(row.id))
-      .filter((row): row is StoredResponse => row !== null);
+    const responses = await Promise.all(rows.map((row) => this.getResponse(tenantId, row.id)));
+    return responses.filter((row): row is StoredResponse => row !== null);
   }
 
-  public getChainUntil(responseId: string): StoredResponse[] {
+  public async getChainUntil(tenantId: string, responseId: string): Promise<StoredResponse[]> {
     const chain: StoredResponse[] = [];
     let cursor: string | null = responseId;
 
     while (cursor) {
-      const response = this.getResponse(cursor);
+      const response = await this.getResponse(tenantId, cursor);
       if (!response) {
         break;
       }
@@ -340,43 +386,44 @@ export class ResponseStore {
     return chain;
   }
 
-  public createBackgroundJob(responseId: string): void {
+  public async createBackgroundJob(tenantId: string, responseId: string): Promise<void> {
     this.db
       .prepare(
         `
-          INSERT OR REPLACE INTO background_jobs (response_id, state, started_at, finished_at, error)
-          VALUES (?, 'queued', ?, NULL, NULL)
+          INSERT OR REPLACE INTO background_jobs (tenant_id, response_id, state, started_at, finished_at, error)
+          VALUES (?, ?, 'queued', ?, NULL, NULL)
         `,
       )
-      .run(responseId, Date.now());
+      .run(tenantId, responseId, Date.now());
   }
 
-  public updateBackgroundJob(
+  public async updateBackgroundJob(
+    tenantId: string,
     responseId: string,
     state: string,
     options?: { finished?: boolean; error?: string | null },
-  ): void {
+  ): Promise<void> {
     this.db
       .prepare(
         `
           UPDATE background_jobs
           SET state = ?, finished_at = ?, error = COALESCE(?, error)
-          WHERE response_id = ?
+          WHERE tenant_id = ? AND response_id = ?
         `,
       )
-      .run(state, options?.finished ? Date.now() : null, options?.error ?? null, responseId);
+      .run(state, options?.finished ? Date.now() : null, options?.error ?? null, tenantId, responseId);
   }
 
-  private getResponseRow(responseId: string): ResponseRow | null {
+  private getResponseRow(tenantId: string, responseId: string): ResponseRow | null {
     const row = this.db
       .prepare(
         `
           SELECT id, request_json, chat_request_json, response_json, status, previous_response_id, conversation_id, deleted
           FROM responses
-          WHERE id = ?
+          WHERE tenant_id = ? AND id = ?
         `,
       )
-      .get(responseId) as ResponseRow | undefined;
+      .get(tenantId, responseId) as ResponseRow | undefined;
 
     return row ?? null;
   }

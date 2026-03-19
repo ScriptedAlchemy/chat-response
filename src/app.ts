@@ -17,7 +17,7 @@ export function createApp(config: AdapterConfig) {
 
   const store = new ResponseStore(config.sqlitePath);
   const client = new ChatCompletionsClient(config.upstream);
-  const service = new ResponseService(config, store, client);
+  const service = new ResponseService(config, store, client, "local");
 
   app.addHook("onRequest", async (request) => {
     if (!config.adapterApiKey || request.url === "/health") {

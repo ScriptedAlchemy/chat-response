@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { InputItemListResponse, ResponseObject } from "../src/types/openai.js";
 import { startAdapterServer } from "./fixtures/adapter-server.js";
 import { startMockChatServer } from "./fixtures/upstream-chat-server.js";
+import { readJson } from "./json.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -56,7 +58,7 @@ describe("responses create lifecycle", () => {
     });
 
     expect(createResponse.status).toBe(200);
-    const created = await createResponse.json();
+    const created = await readJson<ResponseObject>(createResponse);
     expect(created.object).toBe("response");
     expect(created.output_text).toBe("Hello from upstream");
     expect(created.status).toBe("completed");
@@ -72,7 +74,7 @@ describe("responses create lifecycle", () => {
 
     const retrievedResponse = await fetch(`${adapter.url}/v1/responses/${created.id}`);
     expect(retrievedResponse.status).toBe(200);
-    const retrieved = await retrievedResponse.json();
+    const retrieved = await readJson<ResponseObject>(retrievedResponse);
     expect(retrieved.id).toBe(created.id);
     expect(retrieved.output_text).toBe("Hello from upstream");
 
@@ -80,7 +82,7 @@ describe("responses create lifecycle", () => {
       `${adapter.url}/v1/responses/${created.id}/input_items?order=asc`,
     );
     expect(inputItemsResponse.status).toBe(200);
-    const inputItems = await inputItemsResponse.json();
+    const inputItems = await readJson<InputItemListResponse>(inputItemsResponse);
     expect(inputItems.data).toHaveLength(1);
     expect(inputItems.data[0]).toMatchObject({
       role: "user",

@@ -2,6 +2,16 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { startAdapterServer } from "./fixtures/adapter-server.js";
 import { startMockChatServer } from "./fixtures/upstream-chat-server.js";
+import { readJson } from "./json.js";
+
+type ErrorResponse = {
+  error: {
+    message: string;
+    type: string;
+    param: string | null;
+    code: string;
+  };
+};
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -44,7 +54,7 @@ describe("responses error handling", () => {
     });
 
     expect(response.status).toBe(400);
-    const body = await response.json();
+    const body = await readJson<ErrorResponse>(response);
     expect(body.error).toMatchObject({
       code: "invalid_request_error",
       param: "prompt"
@@ -80,7 +90,7 @@ describe("responses error handling", () => {
     });
 
     expect(response.status).toBe(429);
-    const body = await response.json();
+    const body = await readJson<ErrorResponse>(response);
     expect(body.error).toMatchObject({
       code: "upstream_error",
       type: "server_error"
@@ -124,7 +134,7 @@ describe("responses error handling", () => {
     });
 
     expect(response.status).toBe(400);
-    const body = await response.json();
+    const body = await readJson<ErrorResponse>(response);
     expect(body.error).toMatchObject({
       code: "unsupported_feature"
     });

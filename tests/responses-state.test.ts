@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { ResponseObject } from "../src/types/openai.js";
 import { startAdapterServer } from "./fixtures/adapter-server.js";
 import { startMockChatServer } from "./fixtures/upstream-chat-server.js";
+import { readJson } from "./json.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -122,7 +124,7 @@ describe("responses state handling", () => {
         input: "first turn"
       })
     });
-    const first = await firstResponse.json();
+    const first = await readJson<ResponseObject>(firstResponse);
     expect(firstResponse.status).toBe(200);
     expect(first.conversation).toEqual({ id: "conv_shared" });
 
@@ -135,7 +137,7 @@ describe("responses state handling", () => {
         input: "second turn"
       })
     });
-    const second = await secondResponse.json();
+    const second = await readJson<ResponseObject>(secondResponse);
     expect(secondResponse.status).toBe(200);
     expect(second.conversation).toEqual({ id: "conv_shared" });
     expect(second.output_text).toBe("saw 3 messages");
