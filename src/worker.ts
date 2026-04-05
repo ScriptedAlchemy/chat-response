@@ -322,6 +322,14 @@ function serviceForTenant(
   );
 }
 
+function upstreamClientForTenant(env: WorkerEnv, tenant: TenantRecord, request: Request): ChatCompletionsClient {
+  const resolvedUpstream = resolveTenantUpstream(env, tenant);
+  return new ChatCompletionsClient({
+    ...resolvedUpstream,
+    apiKey: passthroughProviderApiKey(request) ?? resolvedUpstream.apiKey
+  });
+}
+
 function buildCodexConfigToml(baseUrl: string): string {
   return `[model_providers.chatproxy]
 name = "Chat Proxy"
@@ -1245,6 +1253,7 @@ async function handleTenantApi(
     }
 
     const encryption = await resolveTenantEncryption(env.DB, tenant, request);
+    const upstreamClient = upstreamClientForTenant(env, tenant, request);
     const service = serviceForTenant(env, tenant, request, encryption);
 
     if (request.method === "GET" && (path === "" || path === "/")) {
@@ -1285,6 +1294,15 @@ async function handleTenantApi(
         waitUntil: (task: Promise<unknown>) => ctx.waitUntil(task)
       });
       return Response.json(created.response);
+    }
+
+    if (request.method === "GET" && path === "/v1/models") {
+      return Response.json(await upstreamClient.listModels());
+    }
+
+    if (request.method === "GET" && path.startsWith("/v1/models/")) {
+      const modelId = decodeURIComponent(path.slice("/v1/models/".length));
+      return Response.json(await upstreamClient.retrieveModel(modelId));
     }
 
     if (request.method === "GET" && path.startsWith("/v1/responses/") && path.endsWith("/input_items")) {

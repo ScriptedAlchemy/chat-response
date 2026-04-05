@@ -6,6 +6,7 @@ export interface MockChatReply {
   status?: number;
   json?: ChatCompletionResponse | { error: { message: string } };
   stream?: object[];
+  rawStreamFrames?: string[];
 }
 
 export async function startMockChatServer(
@@ -40,6 +41,9 @@ export async function startMockChatServer(
         "cache-control": "no-cache"
       });
 
+      for (const frame of reply.rawStreamFrames ?? []) {
+        res.write(frame);
+      }
       for (const event of reply.stream ?? []) {
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       }

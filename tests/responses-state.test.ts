@@ -148,4 +148,166 @@ describe("responses state handling", () => {
       expect.objectContaining({ role: "user", content: "second turn" })
     ]);
   });
+
+  it("maps assistant output_text input parts to plain assistant text instead of JSON strings", async () => {
+    const upstream = await startMockChatServer((request) => ({
+      json: {
+        id: "chatcmpl_assistant_input",
+        object: "chat.completion",
+        created: 1,
+        model: request.model,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: "ok"
+            }
+          }
+        ]
+      }
+    }));
+    cleanups.push(upstream.close);
+
+    const adapter = await startAdapterServer({
+      upstream: {
+        baseUrl: upstream.url
+      }
+    });
+    cleanups.push(adapter.close);
+
+    const response = await fetch(`${adapter.url}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "output_text",
+                text: "Prior assistant answer"
+              }
+            ]
+          },
+          {
+            type: "message",
+            role: "user",
+            content: "Continue from there"
+          }
+        ]
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]?.messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Prior assistant answer"
+          }
+        ]
+      }),
+      expect.objectContaining({
+        role: "user",
+        content: "Continue from there"
+      })
+    ]);
+  });
+
+  it("replays stored assistant output_text history without stringifying it", async () => {
+    const upstream = await startMockChatServer((request) => ({
+      json: {
+        id: `chatcmpl_history_${request.messages.length}`,
+        object: "chat.completion",
+        created: 1,
+        model: request.model,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: "history ok"
+            }
+          }
+        ]
+      }
+    }));
+    cleanups.push(upstream.close);
+
+    const adapter = await startAdapterServer({
+      upstream: {
+        baseUrl: upstream.url
+      }
+    });
+    cleanups.push(adapter.close);
+
+    const firstResponse = await fetch(`${adapter.url}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "output_text",
+                text: "Earlier assistant text"
+              }
+            ]
+          },
+          {
+            type: "message",
+            role: "user",
+            content: "First real user turn"
+          }
+        ]
+      })
+    });
+    const first = await readJson<ResponseObject>(firstResponse);
+    expect(firstResponse.status).toBe(200);
+
+    const secondResponse = await fetch(`${adapter.url}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5",
+        previous_response_id: first.id,
+        input: "Follow up"
+      })
+    });
+
+    expect(secondResponse.status).toBe(200);
+    expect(upstream.requests[1]?.messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Earlier assistant text"
+          }
+        ]
+      }),
+      expect.objectContaining({
+        role: "user",
+        content: "First real user turn"
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        content: "history ok"
+      }),
+      expect.objectContaining({
+        role: "user",
+        content: "Follow up"
+      })
+    ]);
+  });
 });

@@ -55,6 +55,7 @@ export interface ResponseInputMessagePart {
   type?: string;
   text?: string;
   input_text?: string;
+  refusal?: string;
   image_url?: string;
   detail?: string;
   file_id?: string | null;
@@ -209,6 +210,18 @@ export interface ChatCompletionResponse {
     total_tokens?: number;
   };
   service_tier?: string | null;
+}
+
+export interface ModelObject {
+  id: string;
+  object: "model";
+  created?: number;
+  owned_by?: string;
+}
+
+export interface ModelListResponse {
+  object: "list";
+  data: ModelObject[];
 }
 
 export interface ChatCompletionChunk {

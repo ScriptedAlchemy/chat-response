@@ -49,14 +49,23 @@ export async function readSseStream(
       const dataLines: string[] = [];
 
       for (const line of rawChunk.split("\n")) {
-        if (line.startsWith("event:")) {
+        if (line.startsWith(":")) {
+          continue;
+        } else if (line.startsWith("event:")) {
           event = line.slice("event:".length).trim();
         } else if (line.startsWith("data:")) {
           dataLines.push(line.slice("data:".length).trimStart());
         }
       }
 
+      if (dataLines.length === 0) {
+        continue;
+      }
+
       const data = dataLines.join("\n");
+      if (!data.trim()) {
+        continue;
+      }
       await onEvent(event, data);
     }
   }

@@ -24,10 +24,16 @@ function partToChatPart(
   switch (part.type) {
     case "input_text":
     case "text":
+    case "output_text":
     case undefined:
       return {
         type: "text",
         text: part.text ?? part.input_text ?? ""
+      };
+    case "refusal":
+      return {
+        type: "text",
+        text: part.refusal ?? ""
       };
     case "input_image":
       return {

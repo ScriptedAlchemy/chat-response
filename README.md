@@ -7,6 +7,8 @@ This is designed for clients like **Codex** that speak the Responses API but nee
 ## What it does
 
 - Exposes Responses-compatible endpoints:
+  - `GET /v1/models`
+  - `GET /v1/models/:model`
   - `POST /v1/responses`
   - `GET /v1/responses/:id`
   - `DELETE /v1/responses/:id`

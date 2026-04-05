@@ -1,6 +1,11 @@
 import { upstreamError } from "../errors.js";
 import type { AdapterConfig } from "../config.js";
-import type { ChatCompletionRequest, ChatCompletionResponse } from "../types/openai.js";
+import type {
+  ChatCompletionRequest,
+  ChatCompletionResponse,
+  ModelListResponse,
+  ModelObject
+} from "../types/openai.js";
 
 async function parseErrorBody(response: Response): Promise<string> {
   const contentType = response.headers.get("content-type") ?? "";
@@ -26,7 +31,7 @@ export class ChatCompletionsClient {
     request: ChatCompletionRequest,
     signal?: AbortSignal,
   ): Promise<ChatCompletionResponse> {
-    const response = await fetch(this.url(), {
+    const response = await fetch(this.chatUrl(), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({ ...request, stream: false }),
@@ -44,7 +49,7 @@ export class ChatCompletionsClient {
     request: ChatCompletionRequest,
     signal?: AbortSignal,
   ): Promise<ReadableStream<Uint8Array>> {
-    const response = await fetch(this.url(), {
+    const response = await fetch(this.chatUrl(), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({ ...request, stream: true }),
@@ -62,19 +67,65 @@ export class ChatCompletionsClient {
     return response.body;
   }
 
-  private url(): URL {
-    const url = new URL(this.config.chatPath, `${this.config.baseUrl}/`);
+  public async listModels(signal?: AbortSignal): Promise<ModelListResponse> {
+    return (await this.getJson(this.modelsUrl(), signal)) as ModelListResponse;
+  }
+
+  public async retrieveModel(modelId: string, signal?: AbortSignal): Promise<ModelObject> {
+    return (await this.getJson(this.modelsUrl(modelId), signal)) as ModelObject;
+  }
+
+  private async getJson(url: URL, signal?: AbortSignal): Promise<unknown> {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.headers(false),
+      signal
+    });
+
+    if (!response.ok) {
+      throw upstreamError(response.status, await parseErrorBody(response));
+    }
+
+    return await response.json();
+  }
+
+  private chatUrl(): URL {
+    return this.urlForPath(this.config.chatPath);
+  }
+
+  private modelsUrl(modelId?: string): URL {
+    const path = this.modelsPath();
+    const suffix = modelId ? `/${encodeURIComponent(modelId)}` : "";
+    return this.urlForPath(`${path}${suffix}`);
+  }
+
+  private modelsPath(): string {
+    const normalized = this.config.chatPath.replace(/\/+$/, "");
+    if (normalized.endsWith("/chat/completions")) {
+      return `${normalized.slice(0, -"/chat/completions".length)}/models`;
+    }
+
+    if (normalized.endsWith("/responses")) {
+      return `${normalized.slice(0, -"/responses".length)}/models`;
+    }
+
+    return "/v1/models";
+  }
+
+  private urlForPath(path: string): URL {
+    const url = new URL(path, `${this.config.baseUrl}/`);
     for (const [key, value] of Object.entries(this.config.queryParams)) {
       url.searchParams.set(key, value);
     }
     return url;
   }
 
-  private headers(): Headers {
-    const headers = new Headers({
-      "content-type": "application/json",
-      ...this.config.headers
-    });
+  private headers(includeJsonContentType = true): Headers {
+    const headers = new Headers(this.config.headers);
+
+    if (includeJsonContentType) {
+      headers.set("content-type", "application/json");
+    }
 
     if (this.config.authMode === "bearer" && this.config.apiKey) {
       headers.set("authorization", `Bearer ${this.config.apiKey}`);
